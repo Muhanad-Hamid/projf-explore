@@ -1,0 +1,122 @@
+// Multiplier module with rounding and overflow detection
+// Translated from SystemVerilog to Spade
+
+// State enumeration for the multiplier state machine
+enum MulState {
+    Idle,
+    Calc,
+    Trunc,
+    Round
+}
+
+entity mul(
+    clk: clock,
+    rst: bool,
+    start: bool,
+    a: int<25>,     // signed 25-bit multiplier (factor)
+    b: int<25>      // signed 25-bit multiplicand (factor)
+) -> (
+    busy: bool,     // calculation in progress
+    done: bool,     // calculation is complete (high for one tick) 
+    valid: bool,    // result is valid
+    ovf: bool,      // overflow
+    val: int<25>    // result value: product
+) {
+    // Constants
+    let HALF = 0b100000000000000000000u21;  // 1 followed by 20 zeros
+    
+    // State registers
+    reg(clk) state reset(rst: MulState::Idle) = match state {
+        MulState::Idle => if start { MulState::Calc } else { MulState::Idle },
+        MulState::Calc => MulState::Trunc,
+        MulState::Trunc => MulState::Round,
+        MulState::Round => MulState::Idle
+    };
+    
+    // Input registers
+    reg(clk) a1 reset(rst: 0i25) = if start { a } else { a1 };
+    reg(clk) b1 reset(rst: 0i25) = if start { b } else { b1 };
+    reg(clk) sig_diff reset(rst: false) = if start { a[24] ^ b[24] } else { sig_diff };
+    
+    // Product calculation registers
+    reg(clk) prod reset(rst: 0i50) = match state {
+        MulState::Calc => sext(a1) * sext(b1),
+        _ => prod
+    };
+    
+    // Truncation stage registers
+    reg(clk) prod_t reset(rst: 0i25) = match state {
+        MulState::Trunc => trunc(prod >> 21),
+        _ => prod_t
+    };
+    
+    reg(clk) rbits reset(rst: 0u21) = match state {
+        MulState::Trunc => trunc(prod & 0x1fffffi50),
+        _ => rbits
+    };
+    
+    reg(clk) round reset(rst: false) = match state {
+        MulState::Trunc => prod[20],
+        _ => round
+    };
+    
+    reg(clk) even reset(rst: false) = match state {
+        MulState::Trunc => !prod[21],
+        _ => even
+    };
+    
+    // Output registers
+    reg(clk) busy_reg reset(rst: false) = match state {
+        MulState::Idle => if start { true } else { false },
+        MulState::Round => false,
+        _ => busy_reg
+    };
+    
+    reg(clk) done_reg reset(rst: false) = match state {
+        MulState::Round => true,
+        _ => false
+    };
+    
+    reg(clk) valid_reg reset(rst: false) = match state {
+        MulState::Round => {
+            let overflow_bits = prod >> 46;
+            let no_overflow = overflow_bits == 0i4 || overflow_bits == -1i4;
+            let sign_correct = sig_diff == prod_t[24];
+            sign_correct && no_overflow
+        },
+        MulState::Idle => if start { false } else { valid_reg },
+        _ => valid_reg
+    };
+    
+    reg(clk) ovf_reg reset(rst: false) = match state {
+        MulState::Round => {
+            let overflow_bits = prod >> 46;
+            let no_overflow = overflow_bits == 0i4 || overflow_bits == -1i4;
+            let sign_correct = sig_diff == prod_t[24];
+            !(sign_correct && no_overflow)
+        },
+        MulState::Idle => if start { false } else { ovf_reg },
+        _ => ovf_reg
+    };
+    
+    reg(clk) val_reg reset(rst: 0i25) = match state {
+        MulState::Round => {
+            // Gaussian rounding (round half to even)
+            if round && !(even && rbits == sext(HALF)) {
+                prod_t + 1i25
+            } else {
+                prod_t
+            }
+        },
+        _ => val_reg
+    };
+    
+    // Output assignments
+    (
+        busy: busy_reg,
+        done: done_reg,
+        valid: valid_reg,
+        ovf: ovf_reg,
+        val: val_reg
+    )
+}
